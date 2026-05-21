@@ -634,9 +634,11 @@ def layout(title, body, flash=""):
     h2 {{ margin: 0 0 14px; font-size: 22px; letter-spacing: 0; }}
     .sub {{ color: var(--muted); margin: 10px 0 0; font-weight: 700; }}
     .stats {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 18px 0; }}
+    .stats.with-deadline {{ grid-template-columns: 1fr; }}
     .stat {{ border: 1px solid var(--line); border-radius: 8px; padding: 14px; background: #fffdf8; }}
     .stat span {{ display: block; color: var(--muted); font-size: 13px; font-weight: 800; }}
     .stat strong {{ display: block; font-size: 28px; margin-top: 4px; }}
+    .stat.deadline strong {{ font-size: 22px; line-height: 1.2; }}
     .badge {{ display: inline-flex; align-items: center; min-height: 34px; padding: 6px 10px; border-radius: 8px; background: #f2e7db; color: var(--court-dark); font-weight: 900; }}
     .btn, button {{
       border: 0;
@@ -692,6 +694,7 @@ def layout(title, body, flash=""):
       .shell {{ padding-top: 28px; }}
       .hero {{ padding: 32px; }}
       .grid.two {{ grid-template-columns: 1fr 1fr; }}
+      .stats.with-deadline {{ grid-template-columns: repeat(3, minmax(0, 1fr)); }}
     }}
   </style>
 </head>
@@ -719,9 +722,10 @@ def home_page(flash=""):
       <span class="badge">{escape(label)}</span>
       <h1>{format_event_date(event)}<br>晚上上場</h1>
       <p class="sub">{event['start_time']}-{event['end_time']} · {escape(event['location'])}</p>
-      <div class="stats">
+      <div class="stats with-deadline">
         <div class="stat"><span>正式名單</span><strong>{confirmed} / {event['confirmed_capacity']}</strong></div>
         <div class="stat"><span>候補名單</span><strong>{waitlisted} / {event['waitlist_capacity']}</strong></div>
+        <div class="stat deadline"><span>報名截止</span><strong>{format_deadline(event)}</strong></div>
       </div>
       <div class="actions">
         <a class="btn" href="/event">查看 / 報名</a>
@@ -797,10 +801,11 @@ def event_page(flash=""):
     <section class="hero">
       <span class="badge">{escape(label)}</span>
       <h1>{format_event_date(event)}<br>{escape(event['location'])}</h1>
-      <p class="sub">{event['start_time']}-{event['end_time']} · 報名截止 {format_deadline(event)}</p>
-      <div class="stats">
+      <p class="sub">{event['start_time']}-{event['end_time']}</p>
+      <div class="stats with-deadline">
         <div class="stat"><span>正式名單</span><strong>{confirmed_count} / {event['confirmed_capacity']}</strong></div>
         <div class="stat"><span>候補名單</span><strong>{waitlisted_count} / {event['waitlist_capacity']}</strong></div>
+        <div class="stat deadline"><span>報名截止</span><strong>{format_deadline(event)}</strong></div>
       </div>
       {form}
     </section>

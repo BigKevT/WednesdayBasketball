@@ -196,15 +196,26 @@ def next_wednesday_event_date():
     return event_day
 
 
+def registration_deadline_for(event_day):
+    return datetime.combine(event_day - timedelta(days=1), DEADLINE_TIME, tzinfo=TZ)
+
+
 def ensure_current_event():
     event_day = next_wednesday_event_date()
     with connect() as conn:
         row = conn.execute(sql("SELECT * FROM events WHERE date = ?"), (event_day.isoformat(),)).fetchone()
         if row:
+            expected_deadline = iso(registration_deadline_for(event_day))
+            if row["registration_deadline"] != expected_deadline:
+                conn.execute(
+                    sql("UPDATE events SET registration_deadline = ?, updated_at = ? WHERE id = ?"),
+                    (expected_deadline, iso(now()), row["id"]),
+                )
+                row = conn.execute(sql("SELECT * FROM events WHERE id = ?"), (row["id"],)).fetchone()
             return row
 
         created = iso(now())
-        deadline = datetime.combine(event_day, DEADLINE_TIME, tzinfo=TZ)
+        deadline = registration_deadline_for(event_day)
         conn.execute(
             sql(
                 """
@@ -556,6 +567,12 @@ def format_event_date(event):
     return f"{event_date.month}/{event_date.day}（三）"
 
 
+def format_deadline(event):
+    deadline = datetime.fromisoformat(event["registration_deadline"])
+    weekday_labels = ["一", "二", "三", "四", "五", "六", "日"]
+    return f"{deadline.month}/{deadline.day}（{weekday_labels[deadline.weekday()]}） {deadline.strftime('%H:%M')}"
+
+
 def layout(title, body, flash=""):
     message = f'<div class="flash">{escape(flash)}</div>' if flash else ""
     return f"""<!doctype html>
@@ -780,7 +797,7 @@ def event_page(flash=""):
     <section class="hero">
       <span class="badge">{escape(label)}</span>
       <h1>{format_event_date(event)}<br>{escape(event['location'])}</h1>
-      <p class="sub">{event['start_time']}-{event['end_time']} · 報名截止 {format_event_date(event)} 12:00</p>
+      <p class="sub">{event['start_time']}-{event['end_time']} · 報名截止 {format_deadline(event)}</p>
       <div class="stats">
         <div class="stat"><span>正式名單</span><strong>{confirmed_count} / {event['confirmed_capacity']}</strong></div>
         <div class="stat"><span>候補名單</span><strong>{waitlisted_count} / {event['waitlist_capacity']}</strong></div>

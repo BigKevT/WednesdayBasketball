@@ -1,6 +1,7 @@
 from datetime import date, datetime, time, timedelta
 from html import escape
 from pathlib import Path
+from time import monotonic
 from urllib.parse import quote
 import os
 import secrets
@@ -32,6 +33,8 @@ LOCATION = "木柵國中"
 app = Flask(__name__)
 DB_INITIALIZED = False
 SHARED_DB_CONN = None
+STATE_CACHE = {}
+CACHE_TTL_SECONDS = 15
 
 
 class RequestConnection:
@@ -51,6 +54,26 @@ class RequestConnection:
 
 def using_postgres():
     return bool(DATABASE_URL)
+
+
+def cache_get(key):
+    cached = STATE_CACHE.get(key)
+    if not cached:
+        return None
+    timestamp, value = cached
+    if monotonic() - timestamp > CACHE_TTL_SECONDS:
+        STATE_CACHE.pop(key, None)
+        return None
+    return value
+
+
+def cache_set(key, value):
+    STATE_CACHE[key] = (monotonic(), value)
+    return value
+
+
+def invalidate_cache():
+    STATE_CACHE.clear()
 
 
 def now():
@@ -264,6 +287,7 @@ def ensure_current_event():
                     (expected_deadline, iso(now()), row["id"]),
                 )
                 row = conn.execute(sql("SELECT * FROM events WHERE id = ?"), (row["id"],)).fetchone()
+                invalidate_cache()
             return row
 
         created = iso(now())
@@ -292,11 +316,16 @@ def ensure_current_event():
             ),
         )
         row = conn.execute(sql("SELECT * FROM events WHERE date = ?"), (event_day.isoformat(),)).fetchone()
+    invalidate_cache()
     auto_register_recurring_players(row)
     return row
 
 
 def get_current_event_with_counts():
+    cached = cache_get("current_event_with_counts")
+    if cached is not None:
+        return cached
+
     event = ensure_current_event()
     with connect() as conn:
         counts = conn.execute(
@@ -311,10 +340,18 @@ def get_current_event_with_counts():
             ),
             (event["id"],),
         ).fetchone()
-        return event, counts["confirmed_count"] or 0, counts["waitlisted_count"] or 0
+        return cache_set(
+            "current_event_with_counts",
+            (event, counts["confirmed_count"] or 0, counts["waitlisted_count"] or 0),
+        )
 
 
 def list_registrations(event_id, status=None):
+    cache_key = ("registrations", event_id, status or "all")
+    cached = cache_get(cache_key)
+    if cached is not None:
+        return cached
+
     query = "SELECT * FROM registrations WHERE event_id = ?"
     params = [event_id]
     if status:
@@ -322,20 +359,27 @@ def list_registrations(event_id, status=None):
         params.append(status)
     query += " ORDER BY position ASC, created_at ASC"
     with connect() as conn:
-        return conn.execute(sql(query), tuple(params)).fetchall()
+        return cache_set(cache_key, conn.execute(sql(query), tuple(params)).fetchall())
 
 
 def list_recurring_players():
+    cached = cache_get("recurring_players")
+    if cached is not None:
+        return cached
+
     with connect() as conn:
-        return conn.execute(
-            sql(
-                """
-                SELECT * FROM recurring_players
-                WHERE enabled = 1
-                ORDER BY position ASC, created_at ASC
-                """
-            )
-        ).fetchall()
+        return cache_set(
+            "recurring_players",
+            conn.execute(
+                sql(
+                    """
+                    SELECT * FROM recurring_players
+                    WHERE enabled = 1
+                    ORDER BY position ASC, created_at ASC
+                    """
+                )
+            ).fetchall(),
+        )
 
 
 def count_status(conn, event_id, status):
@@ -397,6 +441,7 @@ def add_recurring_player(name):
             ),
             (clean_name, next_recurring_position(conn), created, created),
         )
+    invalidate_cache()
 
     event = ensure_current_event()
     ok, roster_msg = add_registration(event, clean_name, "admin")
@@ -418,6 +463,7 @@ def delete_recurring_player(player_id):
             sql("UPDATE recurring_players SET enabled = 0, updated_at = ? WHERE id = ?"),
             (iso(now()), player_id),
         )
+    invalidate_cache()
     return True, f"{row['name']} 已從固定報名名單移除。"
 
 
@@ -474,6 +520,7 @@ def add_registration(event, name, created_by="player", force_status=None):
             ),
             (event["id"], clean_name, status, next_position(conn, event["id"]), created_by, created, created),
         )
+    invalidate_cache()
 
     if status == "confirmed":
         return True, f"{clean_name} 已加入正式名單。"
@@ -512,6 +559,7 @@ def cancel_registration(registration_id, actor="player"):
                     (actor, updated, candidate["id"]),
                 )
                 promoted_name = candidate["name"]
+    invalidate_cache()
 
     if promoted_name:
         return True, f"已取消 {reg['name']}，{promoted_name} 已自動遞補。"
@@ -538,6 +586,7 @@ def update_status(registration_id, new_status):
             sql("UPDATE registrations SET status = ?, updated_by = 'admin', updated_at = ? WHERE id = ?"),
             (new_status, iso(now()), registration_id),
         )
+    invalidate_cache()
     return True, "管理者已更新名單。"
 
 
@@ -569,6 +618,7 @@ def update_event_settings(event_id, confirmed_capacity, waitlist_capacity):
             ),
             (confirmed_capacity, waitlist_capacity, iso(now()), event_id),
         )
+    invalidate_cache()
     return True, "名額設定已更新。"
 
 
@@ -601,6 +651,7 @@ def move_registration(registration_id, direction):
             sql("UPDATE registrations SET position = ?, updated_by = 'admin', updated_at = ? WHERE id = ?"),
             (reg["position"], updated, target["id"]),
         )
+    invalidate_cache()
     return True, "順位已更新。"
 
 

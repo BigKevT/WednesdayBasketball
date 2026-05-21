@@ -106,6 +106,25 @@ def init_db():
                 WHERE status != 'cancelled'
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS recurring_players (
+                    id BIGSERIAL PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    position INTEGER NOT NULL,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_active_recurring_player_name
+                ON recurring_players(lower(name))
+                WHERE enabled = 1
+                """
+            )
             return
 
         conn.executescript(
@@ -140,6 +159,19 @@ def init_db():
             CREATE UNIQUE INDEX IF NOT EXISTS idx_active_event_name
             ON registrations(event_id, lower(name))
             WHERE status != 'cancelled';
+
+            CREATE TABLE IF NOT EXISTS recurring_players (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                position INTEGER NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_active_recurring_player_name
+            ON recurring_players(lower(name))
+            WHERE enabled = 1;
             """
         )
 
@@ -196,7 +228,9 @@ def ensure_current_event():
                 created,
             ),
         )
-        return conn.execute(sql("SELECT * FROM events WHERE date = ?"), (event_day.isoformat(),)).fetchone()
+        row = conn.execute(sql("SELECT * FROM events WHERE date = ?"), (event_day.isoformat(),)).fetchone()
+    auto_register_recurring_players(row)
+    return row
 
 
 def get_current_event_with_counts():
@@ -228,12 +262,42 @@ def list_registrations(event_id, status=None):
         return conn.execute(sql(query), tuple(params)).fetchall()
 
 
+def list_recurring_players():
+    with connect() as conn:
+        return conn.execute(
+            sql(
+                """
+                SELECT * FROM recurring_players
+                WHERE enabled = 1
+                ORDER BY position ASC, created_at ASC
+                """
+            )
+        ).fetchall()
+
+
 def count_status(conn, event_id, status):
     row = conn.execute(
         sql("SELECT COUNT(*) AS total FROM registrations WHERE event_id = ? AND status = ?"),
         (event_id, status),
     ).fetchone()
     return row["total"]
+
+
+def next_recurring_position(conn):
+    row = conn.execute(
+        "SELECT COALESCE(MAX(position), 0) + 1 AS next_pos FROM recurring_players WHERE enabled = 1"
+    ).fetchone()
+    return row["next_pos"]
+
+
+def recurring_name_exists(conn, name):
+    return (
+        conn.execute(
+            sql("SELECT 1 FROM recurring_players WHERE lower(name) = lower(?) AND enabled = 1"),
+            (name,),
+        ).fetchone()
+        is not None
+    )
 
 
 def active_name_exists(conn, event_id, name):
@@ -249,6 +313,54 @@ def active_name_exists(conn, event_id, name):
         ).fetchone()
         is not None
     )
+
+
+def add_recurring_player(name):
+    clean_name = " ".join(name.strip().split())
+    if not clean_name:
+        return False, "請輸入固定報名者名字。"
+
+    with connect() as conn:
+        if recurring_name_exists(conn, clean_name):
+            return False, "這個名字已經在固定報名名單。"
+
+        created = iso(now())
+        conn.execute(
+            sql(
+                """
+                INSERT INTO recurring_players (name, position, enabled, created_at, updated_at)
+                VALUES (?, ?, 1, ?, ?)
+                """
+            ),
+            (clean_name, next_recurring_position(conn), created, created),
+        )
+
+    event = ensure_current_event()
+    ok, roster_msg = add_registration(event, clean_name, "admin")
+    if ok:
+        return True, f"{clean_name} 已加入固定報名名單，並已套用到本週。"
+    return True, f"{clean_name} 已加入固定報名名單。本週未套用：{roster_msg}"
+
+
+def delete_recurring_player(player_id):
+    with connect() as conn:
+        row = conn.execute(
+            sql("SELECT * FROM recurring_players WHERE id = ? AND enabled = 1"),
+            (player_id,),
+        ).fetchone()
+        if not row:
+            return False, "找不到固定報名者。"
+
+        conn.execute(
+            sql("UPDATE recurring_players SET enabled = 0, updated_at = ? WHERE id = ?"),
+            (iso(now()), player_id),
+        )
+    return True, f"{row['name']} 已從固定報名名單移除。"
+
+
+def auto_register_recurring_players(event):
+    for player in list_recurring_players():
+        add_registration(event, player["name"], "admin")
 
 
 def next_position(conn, event_id):
@@ -628,6 +740,23 @@ def roster_html(rows, prefix, admin=False):
     return f'<ol class="roster">{"".join(items)}</ol>'
 
 
+def recurring_players_html(rows):
+    if not rows:
+        return '<p class="empty">目前沒有固定報名者。</p>'
+    items = []
+    for index, row in enumerate(rows, start=1):
+        controls = f"""
+        <form method="post" action="/admin/recurring/delete" onsubmit="return confirm('確定移除 {escape(row['name'])} 的固定報名設定嗎？')">
+          <input type="hidden" name="id" value="{row['id']}">
+          <button class="small danger">移除</button>
+        </form>
+        """
+        items.append(
+            f'<li class="person"><span class="num">{index}</span><span class="name">{escape(row["name"])}</span>{controls}</li>'
+        )
+    return f'<ol class="roster">{"".join(items)}</ol>'
+
+
 def event_page(flash=""):
     event, confirmed_count, waitlisted_count = get_current_event_with_counts()
     status, label = event_status(event, confirmed_count, waitlisted_count)
@@ -690,6 +819,7 @@ def admin_page(flash=""):
     confirmed = list_registrations(event["id"], "confirmed")
     waitlisted = list_registrations(event["id"], "waitlisted")
     cancelled = list_registrations(event["id"], "cancelled")
+    recurring_players = list_recurring_players()
     body = f"""
     <section class="hero">
       <span class="badge">管理後台</span>
@@ -720,6 +850,16 @@ def admin_page(flash=""):
       <div class="panel"><h2>正式名單</h2>{roster_html(confirmed, "正式", admin=True)}</div>
       <div class="panel"><h2>候補名單</h2>{roster_html(waitlisted, "候補", admin=True)}</div>
       <div class="panel"><h2>取消紀錄</h2>{roster_html(cancelled, "取消", admin=True)}</div>
+      <div class="panel">
+        <h2>固定報名者</h2>
+        <p class="sub">每週新場次建立時，系統會自動幫這些人報名。</p>
+        <form class="form" method="post" action="/admin/recurring/add">
+          <label for="recurring_name">新增固定報名者</label>
+          <input id="recurring_name" name="name" maxlength="40" placeholder="輸入名字">
+          <button>加入固定名單</button>
+        </form>
+        {recurring_players_html(recurring_players)}
+      </div>
     </section>
     """
     return layout("管理後台", body, flash)
@@ -787,6 +927,22 @@ def admin_settings():
         request.form.get("confirmed_capacity", ""),
         request.form.get("waitlist_capacity", ""),
     )
+    return redirect(f"/admin?msg={quote(msg)}")
+
+
+@app.post("/admin/recurring/add")
+def admin_recurring_add():
+    if not admin_authorized():
+        return redirect(f"/admin?msg={quote('請先登入管理後台。')}")
+    ok, msg = add_recurring_player(request.form.get("name", ""))
+    return redirect(f"/admin?msg={quote(msg)}")
+
+
+@app.post("/admin/recurring/delete")
+def admin_recurring_delete():
+    if not admin_authorized():
+        return redirect(f"/admin?msg={quote('請先登入管理後台。')}")
+    ok, msg = delete_recurring_player(int(request.form.get("id", "0")))
     return redirect(f"/admin?msg={quote(msg)}")
 
 

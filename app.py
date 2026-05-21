@@ -6,7 +6,7 @@ import os
 import secrets
 import sqlite3
 
-from flask import Flask, make_response, redirect, request
+from flask import Flask, g, has_request_context, make_response, redirect, request
 
 try:
     from zoneinfo import ZoneInfo
@@ -33,6 +33,21 @@ app = Flask(__name__)
 DB_INITIALIZED = False
 
 
+class RequestConnection:
+    def __init__(self, conn):
+        self.conn = conn
+
+    def __enter__(self):
+        return self.conn
+
+    def __exit__(self, exc_type, exc, traceback):
+        if exc_type:
+            self.conn.rollback()
+        else:
+            self.conn.commit()
+        return False
+
+
 def using_postgres():
     return bool(DATABASE_URL)
 
@@ -51,7 +66,7 @@ def sql(statement):
     return statement
 
 
-def connect():
+def new_connection():
     if using_postgres():
         import psycopg
         from psycopg.rows import dict_row
@@ -62,6 +77,22 @@ def connect():
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
+
+
+def connect():
+    if not has_request_context():
+        return new_connection()
+
+    if "db_conn" not in g:
+        g.db_conn = new_connection()
+    return RequestConnection(g.db_conn)
+
+
+@app.teardown_appcontext
+def close_db(error=None):
+    conn = g.pop("db_conn", None)
+    if conn is not None:
+        conn.close()
 
 
 def init_db():
@@ -179,10 +210,17 @@ def init_db():
 @app.before_request
 def setup_db():
     global DB_INITIALIZED
+    if request.path == "/favicon.ico":
+        return None
     if not DB_INITIALIZED:
         init_db()
         ensure_current_event()
         DB_INITIALIZED = True
+
+
+@app.get("/favicon.ico")
+def favicon():
+    return ("", 204)
 
 
 def next_wednesday_event_date():

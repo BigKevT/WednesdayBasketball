@@ -7,7 +7,7 @@ import os
 import secrets
 import sqlite3
 
-from flask import Flask, g, has_request_context, make_response, redirect, request
+from flask import Flask, g, has_request_context, jsonify, make_response, redirect, request
 
 try:
     from zoneinfo import ZoneInfo
@@ -247,7 +247,7 @@ def init_db():
 @app.before_request
 def setup_db():
     global DB_INITIALIZED
-    if request.path == "/favicon.ico":
+    if request.path in {"/", "/event", "/favicon.ico"}:
         return None
     if not DB_INITIALIZED:
         init_db()
@@ -818,22 +818,37 @@ def layout(title, body, flash=""):
 
 
 def home_page(flash=""):
-    event, confirmed, waitlisted = get_current_event_with_counts()
-    _, label = event_status(event, confirmed, waitlisted)
-    body = f"""
+    body = """
     <section class="hero">
-      <span class="badge">{escape(label)}</span>
-      <h1>{format_event_date(event)}<br>晚上上場</h1>
-      <p class="sub">{event['start_time']}-{event['end_time']} · {escape(event['location'])}</p>
+      <span class="badge" id="status-label">讀取中</span>
+      <h1><span id="event-date">本週三</span><br>晚上上場</h1>
+      <p class="sub" id="event-meta">19:30-21:30 · 木柵國中</p>
       <div class="stats with-deadline">
-        <div class="stat"><span>正式名單</span><strong>{confirmed} / {event['confirmed_capacity']}</strong></div>
-        <div class="stat"><span>候補名單</span><strong>{waitlisted} / {event['waitlist_capacity']}</strong></div>
-        <div class="stat deadline"><span>報名截止</span><strong>{format_deadline(event)}</strong></div>
+        <div class="stat"><span>正式名單</span><strong id="confirmed-count">-- / --</strong></div>
+        <div class="stat"><span>候補名單</span><strong id="waitlisted-count">-- / --</strong></div>
+        <div class="stat deadline"><span>報名截止</span><strong id="deadline">讀取中</strong></div>
       </div>
       <div class="actions">
         <a class="btn" href="/event">查看 / 報名</a>
       </div>
     </section>
+    <script>
+      async function loadSummary() {
+        try {
+          const res = await fetch('/api/state', { cache: 'no-store' });
+          const data = await res.json();
+          document.getElementById('status-label').textContent = data.status_label;
+          document.getElementById('event-date').textContent = data.event_date;
+          document.getElementById('event-meta').textContent = `${data.start_time}-${data.end_time} · ${data.location}`;
+          document.getElementById('confirmed-count').textContent = `${data.confirmed_count} / ${data.confirmed_capacity}`;
+          document.getElementById('waitlisted-count').textContent = `${data.waitlisted_count} / ${data.waitlist_capacity}`;
+          document.getElementById('deadline').textContent = data.deadline;
+        } catch (error) {
+          document.getElementById('status-label').textContent = '暫時無法讀取';
+        }
+      }
+      loadSummary();
+    </script>
     """
     return layout("首頁", body, flash)
 
@@ -882,42 +897,140 @@ def recurring_players_html(rows):
 
 
 def event_page(flash=""):
-    event, confirmed_count, waitlisted_count = get_current_event_with_counts()
-    status, label = event_status(event, confirmed_count, waitlisted_count)
-    confirmed = list_registrations(event["id"], "confirmed")
-    waitlisted = list_registrations(event["id"], "waitlisted")
-    form_disabled = status in {"closed", "full"}
-    button_text = "報名"
-    if status == "closed":
-        button_text = "本週報名已截止"
-    elif status == "full":
-        button_text = "本週已滿"
-
-    form = f"""
-    <form class="form" method="post" action="/register">
+    form = """
+    <form class="form" method="post" action="/register" id="registration-form">
       <label for="name">名字</label>
-      <input id="name" name="name" autocomplete="name" maxlength="40" placeholder="輸入你的名字" {'disabled' if form_disabled else ''}>
-      <button {'disabled' if form_disabled else ''}>{escape(button_text)}</button>
+      <input id="name" name="name" autocomplete="name" maxlength="40" placeholder="輸入你的名字">
+      <button id="register-button">報名</button>
     </form>
     """
-    body = f"""
+    body = """
     <section class="hero">
-      <span class="badge">{escape(label)}</span>
-      <h1>{format_event_date(event)}<br>{escape(event['location'])}</h1>
-      <p class="sub">{event['start_time']}-{event['end_time']}</p>
+      <span class="badge" id="status-label">讀取中</span>
+      <h1><span id="event-date">本週三</span><br><span id="event-location">木柵國中</span></h1>
+      <p class="sub" id="event-time">19:30-21:30</p>
       <div class="stats with-deadline">
-        <div class="stat"><span>正式名單</span><strong>{confirmed_count} / {event['confirmed_capacity']}</strong></div>
-        <div class="stat"><span>候補名單</span><strong>{waitlisted_count} / {event['waitlist_capacity']}</strong></div>
-        <div class="stat deadline"><span>報名截止</span><strong>{format_deadline(event)}</strong></div>
+        <div class="stat"><span>正式名單</span><strong id="confirmed-count">-- / --</strong></div>
+        <div class="stat"><span>候補名單</span><strong id="waitlisted-count">-- / --</strong></div>
+        <div class="stat deadline"><span>報名截止</span><strong id="deadline">讀取中</strong></div>
       </div>
-      {form}
+      __REGISTRATION_FORM__
     </section>
     <section class="grid two">
-      <div class="panel"><h2>正式名單</h2>{roster_html(confirmed, "正式")}</div>
-      <div class="panel"><h2>候補名單</h2>{roster_html(waitlisted, "候補")}</div>
+      <div class="panel"><h2>正式名單</h2><div id="confirmed-roster"><p class="empty">讀取中。</p></div></div>
+      <div class="panel"><h2>候補名單</h2><div id="waitlisted-roster"><p class="empty">讀取中。</p></div></div>
     </section>
+    <script>
+      const flash = document.querySelector('.flash');
+
+      function showMessage(message) {
+        if (!message) return;
+        if (flash) {
+          flash.textContent = message;
+          return;
+        }
+        const box = document.createElement('div');
+        box.className = 'flash';
+        box.textContent = message;
+        document.querySelector('.topbar').after(box);
+      }
+
+      function escapeHtml(value) {
+        return String(value).replace(/[&<>"']/g, (char) => ({
+          '&': '&amp;',
+          '<': '&lt;',
+          '>': '&gt;',
+          '"': '&quot;',
+          "'": '&#039;'
+        }[char]));
+      }
+
+      function rosterHtml(players, prefix) {
+        if (!players.length) return '<p class="empty">目前沒有人。</p>';
+        return `<ol class="roster">${players.map((player, index) => {
+          const label = prefix === '正式' ? index + 1 : `候補 ${index + 1}`;
+          return `<li class="person"><span class="num">${label}</span><span class="name">${escapeHtml(player.name)}</span><button class="small danger" data-cancel-id="${player.id}" data-name="${escapeHtml(player.name)}">取消</button></li>`;
+        }).join('')}</ol>`;
+      }
+
+      async function loadEventState() {
+        const res = await fetch('/api/state', { cache: 'no-store' });
+        const data = await res.json();
+        document.getElementById('status-label').textContent = data.status_label;
+        document.getElementById('event-date').textContent = data.event_date;
+        document.getElementById('event-location').textContent = data.location;
+        document.getElementById('event-time').textContent = `${data.start_time}-${data.end_time}`;
+        document.getElementById('confirmed-count').textContent = `${data.confirmed_count} / ${data.confirmed_capacity}`;
+        document.getElementById('waitlisted-count').textContent = `${data.waitlisted_count} / ${data.waitlist_capacity}`;
+        document.getElementById('deadline').textContent = data.deadline;
+        document.getElementById('confirmed-roster').innerHTML = rosterHtml(data.confirmed, '正式');
+        document.getElementById('waitlisted-roster').innerHTML = rosterHtml(data.waitlisted, '候補');
+
+        const input = document.getElementById('name');
+        const button = document.getElementById('register-button');
+        input.disabled = data.form_disabled;
+        button.disabled = data.form_disabled;
+        button.textContent = data.button_text;
+      }
+
+      document.getElementById('registration-form').addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const input = document.getElementById('name');
+        const button = document.getElementById('register-button');
+        button.disabled = true;
+        button.textContent = '處理中';
+        const res = await fetch('/api/register', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({ name: input.value })
+        });
+        const data = await res.json();
+        showMessage(data.message);
+        if (data.ok) input.value = '';
+        await loadEventState();
+      });
+
+      document.addEventListener('click', async (event) => {
+        const button = event.target.closest('[data-cancel-id]');
+        if (!button) return;
+        if (!confirm(`確定取消 ${button.dataset.name} 的報名嗎？`)) return;
+        button.disabled = true;
+        const res = await fetch('/api/cancel', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({ id: button.dataset.cancelId })
+        });
+        const data = await res.json();
+        showMessage(data.message);
+        await loadEventState();
+      });
+
+      loadEventState().catch(() => showMessage('暫時無法讀取名單，請重新整理。'));
+    </script>
     """
-    return layout("查看 / 報名", body, flash)
+    return layout("查看 / 報名", body.replace("__REGISTRATION_FORM__", form), flash)
+
+
+def public_state():
+    event, confirmed_count, waitlisted_count = get_current_event_with_counts()
+    status, label = event_status(event, confirmed_count, waitlisted_count)
+    return {
+        "event_date": format_event_date(event),
+        "start_time": event["start_time"],
+        "end_time": event["end_time"],
+        "location": event["location"],
+        "deadline": format_deadline(event),
+        "confirmed_count": confirmed_count,
+        "waitlisted_count": waitlisted_count,
+        "confirmed_capacity": event["confirmed_capacity"],
+        "waitlist_capacity": event["waitlist_capacity"],
+        "status": status,
+        "status_label": label,
+        "form_disabled": status in {"closed", "full"},
+        "button_text": "本週報名已截止" if status == "closed" else "本週已滿" if status == "full" else "報名",
+        "confirmed": [{"id": row["id"], "name": row["name"]} for row in list_registrations(event["id"], "confirmed")],
+        "waitlisted": [{"id": row["id"], "name": row["name"]} for row in list_registrations(event["id"], "waitlisted")],
+    }
 
 
 def admin_authorized():
@@ -998,6 +1111,23 @@ def home():
 @app.get("/event")
 def event():
     return event_page(request.args.get("msg", ""))
+
+
+@app.get("/api/state")
+def api_state():
+    return jsonify(public_state())
+
+
+@app.post("/api/register")
+def api_register():
+    ok, msg = add_registration(ensure_current_event(), request.form.get("name", ""), "player")
+    return jsonify({"ok": ok, "message": msg})
+
+
+@app.post("/api/cancel")
+def api_cancel():
+    ok, msg = cancel_registration(int(request.form.get("id", "0")), "player")
+    return jsonify({"ok": ok, "message": msg})
 
 
 @app.post("/register")

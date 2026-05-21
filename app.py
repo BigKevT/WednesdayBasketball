@@ -792,7 +792,33 @@ def layout(title, body, flash=""):
     .name {{ font-weight: 900; overflow-wrap: anywhere; }}
     .empty {{ color: var(--muted); font-weight: 800; margin: 0; }}
     .flash {{ border-left: 4px solid var(--paint); background: #e8f3f5; padding: 12px; border-radius: 8px; margin-bottom: 14px; font-weight: 800; }}
+    .flash.is-error {{ border-left-color: var(--danger); background: #fdecec; color: var(--danger); }}
     .admin-controls {{ display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }}
+    .meta {{ color: var(--muted); font-weight: 700; font-size: 12px; margin-left: 6px; }}
+    .net-banner {{
+      position: fixed; left: 50%; bottom: 14px; transform: translate(-50%, 80px);
+      background: var(--ink); color: #fff; padding: 10px 14px; border-radius: 999px;
+      font-weight: 800; font-size: 13px; box-shadow: 0 12px 28px rgba(23, 23, 23, .25);
+      transition: transform .25s ease;
+      pointer-events: none;
+      z-index: 50;
+    }}
+    .net-banner.is-shown {{ transform: translate(-50%, 0); }}
+    @keyframes person-enter {{
+      from {{ opacity: 0; transform: translateY(-4px); }}
+      to {{ opacity: 1; transform: translateY(0); }}
+    }}
+    @keyframes person-pulse {{
+      0%, 100% {{ box-shadow: inset 0 0 0 0 rgba(199, 90, 36, 0); }}
+      50% {{ box-shadow: inset 0 0 0 2px rgba(199, 90, 36, .18); }}
+    }}
+    .person {{ transition: background .2s ease, border-color .2s ease; }}
+    .person.is-entering {{ animation: person-enter .22s ease-out; }}
+    .person.is-pending {{ background: #fff5e6; animation: person-pulse 1.6s ease-in-out infinite; }}
+    .person.is-pending .name {{ color: var(--court-dark); }}
+    @media (prefers-reduced-motion: reduce) {{
+      .person.is-entering, .person.is-pending {{ animation: none; }}
+    }}
     @media (min-width: 740px) {{
       .shell {{ padding-top: 28px; }}
       .hero {{ padding: 32px; }}
@@ -813,6 +839,25 @@ def layout(title, body, flash=""):
     {message}
     {body}
   </main>
+  <div id="net-banner" class="net-banner" role="status" aria-live="polite"></div>
+  <script>
+    (function () {{
+      const banner = document.getElementById('net-banner');
+      let hideTimer = null;
+      function show(message, ms) {{
+        if (!banner || !message) return;
+        banner.textContent = message;
+        banner.classList.add('is-shown');
+        clearTimeout(hideTimer);
+        if (ms) hideTimer = setTimeout(() => banner.classList.remove('is-shown'), ms);
+      }}
+      function hide() {{ if (banner) banner.classList.remove('is-shown'); clearTimeout(hideTimer); }}
+      window.netBanner = {{ show, hide }};
+      window.addEventListener('offline', () => show('目前離線，操作會在連線後同步'));
+      window.addEventListener('online', () => {{ show('已恢復連線', 1800); window.dispatchEvent(new Event('app:reconnect')); }});
+      if (!navigator.onLine) show('目前離線，操作會在連線後同步');
+    }})();
+  </script>
 </body>
 </html>"""
 
@@ -847,6 +892,7 @@ def home_page(flash=""):
           document.getElementById('status-label').textContent = '暫時無法讀取';
         }
       }
+      window.addEventListener('app:reconnect', loadSummary);
       loadSummary();
     </script>
     """
@@ -921,41 +967,56 @@ def event_page(flash=""):
       <div class="panel"><h2>候補名單</h2><div id="waitlisted-roster"><p class="empty">讀取中。</p></div></div>
     </section>
     <script>
-      const flash = document.querySelector('.flash');
+      const flashEl = document.querySelector('.flash');
+      let state = null;
+      let optimisticId = -1;
+      let lastTicket = 0;
 
-      function showMessage(message) {
+      function showMessage(message, isError) {
         if (!message) return;
-        if (flash) {
-          flash.textContent = message;
+        if (window.netBanner) window.netBanner.show(message, 2400);
+        if (flashEl) {
+          flashEl.textContent = message;
+          flashEl.classList.toggle('is-error', !!isError);
           return;
         }
         const box = document.createElement('div');
-        box.className = 'flash';
+        box.className = 'flash' + (isError ? ' is-error' : '');
         box.textContent = message;
         document.querySelector('.topbar').after(box);
       }
 
       function escapeHtml(value) {
         return String(value).replace(/[&<>"']/g, (char) => ({
-          '&': '&amp;',
-          '<': '&lt;',
-          '>': '&gt;',
-          '"': '&quot;',
-          "'": '&#039;'
+          '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;'
         }[char]));
+      }
+
+      function gatherIds(s) {
+        if (!s) return new Set();
+        return new Set([...s.confirmed.map(p => p.id), ...s.waitlisted.map(p => p.id)]);
+      }
+
+      function annotate(arr, prevIds) {
+        return arr.map(item => ({ ...item, is_new: !prevIds.has(item.id) }));
       }
 
       function rosterHtml(players, prefix) {
         if (!players.length) return '<p class="empty">目前沒有人。</p>';
         return `<ol class="roster">${players.map((player, index) => {
           const label = prefix === '正式' ? index + 1 : `候補 ${index + 1}`;
-          return `<li class="person"><span class="num">${label}</span><span class="name">${escapeHtml(player.name)}</span><button class="small danger" data-cancel-id="${player.id}" data-name="${escapeHtml(player.name)}">取消</button></li>`;
+          const pendingTag = player.pending ? '<span class="meta">同步中</span>' : '';
+          const disabled = player.pending ? 'disabled' : '';
+          const classes = ['person'];
+          if (player.pending) classes.push('is-pending');
+          if (player.is_new) classes.push('is-entering');
+          return `<li class="${classes.join(' ')}" data-key="reg-${player.id}"><span class="num">${label}</span><span class="name">${escapeHtml(player.name)}${pendingTag}</span><button class="small danger" data-cancel-id="${player.id}" data-name="${escapeHtml(player.name)}" ${disabled}>取消</button></li>`;
         }).join('')}</ol>`;
       }
 
-      async function loadEventState() {
-        const res = await fetch('/api/state', { cache: 'no-store' });
-        const data = await res.json();
+      function render(data) {
+        const prevIds = gatherIds(state);
+        state = data;
         document.getElementById('status-label').textContent = data.status_label;
         document.getElementById('event-date').textContent = data.event_date;
         document.getElementById('event-location').textContent = data.location;
@@ -963,8 +1024,8 @@ def event_page(flash=""):
         document.getElementById('confirmed-count').textContent = `${data.confirmed_count} / ${data.confirmed_capacity}`;
         document.getElementById('waitlisted-count').textContent = `${data.waitlisted_count} / ${data.waitlist_capacity}`;
         document.getElementById('deadline').textContent = data.deadline;
-        document.getElementById('confirmed-roster').innerHTML = rosterHtml(data.confirmed, '正式');
-        document.getElementById('waitlisted-roster').innerHTML = rosterHtml(data.waitlisted, '候補');
+        document.getElementById('confirmed-roster').innerHTML = rosterHtml(annotate(data.confirmed, prevIds), '正式');
+        document.getElementById('waitlisted-roster').innerHTML = rosterHtml(annotate(data.waitlisted, prevIds), '候補');
 
         const input = document.getElementById('name');
         const button = document.getElementById('register-button');
@@ -973,48 +1034,111 @@ def event_page(flash=""):
         button.textContent = data.button_text;
       }
 
-      document.getElementById('registration-form').addEventListener('submit', async (event) => {
+      async function eventAction(url, params, optimistic) {
+        if (!state) return;
+        const snapshot = structuredClone(state);
+        const next = structuredClone(state);
+        if (typeof optimistic === 'function') {
+          if (optimistic(next) === false) return;
+          render(next);
+        }
+        const myTicket = ++lastTicket;
+        try {
+          const res = await fetch(url, {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: new URLSearchParams(params),
+          });
+          const data = await res.json();
+          if (myTicket !== lastTicket) return;
+          if (!data.ok && data.message) showMessage(data.message, true);
+          if (data.state) {
+            render(data.state);
+          } else if (!data.ok) {
+            render(snapshot);
+          }
+        } catch (err) {
+          if (myTicket === lastTicket) render(snapshot);
+          showMessage('連線失敗，操作未送出。', true);
+        }
+      }
+
+      async function loadEventState() {
+        try {
+          const res = await fetch('/api/state', { cache: 'no-store', credentials: 'same-origin' });
+          const data = await res.json();
+          render(data);
+        } catch (err) {
+          showMessage('暫時無法讀取名單，請重新整理。', true);
+        }
+      }
+
+      document.getElementById('registration-form').addEventListener('submit', (event) => {
         event.preventDefault();
         const input = document.getElementById('name');
-        const button = document.getElementById('register-button');
-        button.disabled = true;
-        button.textContent = '處理中';
-        const res = await fetch('/api/register', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: new URLSearchParams({ name: input.value })
+        const name = (input.value || '').trim().replace(/\s+/g, ' ');
+        if (!name) { showMessage('請輸入名字。', true); return; }
+        input.value = '';
+        eventAction('/api/register', { name }, (next) => {
+          if (next.form_disabled) { showMessage('本週報名已截止。', true); return false; }
+          const dup = [...next.confirmed, ...next.waitlisted].some(p => p.name.toLowerCase() === name.toLowerCase());
+          if (dup) { showMessage('這個名字已經報名了。', true); return false; }
+          const player = { id: optimisticId--, name, pending: true };
+          if (next.confirmed_count < next.confirmed_capacity) {
+            next.confirmed.push(player); next.confirmed_count += 1;
+          } else if (next.waitlisted_count < next.waitlist_capacity) {
+            next.waitlisted.push(player); next.waitlisted_count += 1;
+          } else {
+            showMessage('本週已滿。', true); return false;
+          }
         });
-        const data = await res.json();
-        showMessage(data.message);
-        if (data.ok) input.value = '';
-        await loadEventState();
       });
 
-      document.addEventListener('click', async (event) => {
+      document.addEventListener('click', (event) => {
         const button = event.target.closest('[data-cancel-id]');
         if (!button) return;
-        if (!confirm(`確定取消 ${button.dataset.name} 的報名嗎？`)) return;
-        button.disabled = true;
-        const res = await fetch('/api/cancel', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: new URLSearchParams({ id: button.dataset.cancelId })
+        const id = Number(button.dataset.cancelId);
+        const name = button.dataset.name;
+        if (!confirm(`確定取消 ${name} 的報名嗎？`)) return;
+        eventAction('/api/cancel', { id }, (next) => {
+          let source = null, idx = -1;
+          for (const list of ['confirmed', 'waitlisted']) {
+            const i = next[list].findIndex(p => p.id === id);
+            if (i !== -1) { source = list; idx = i; break; }
+          }
+          if (!source) return false;
+          next[source].splice(idx, 1);
+          if (source === 'confirmed') {
+            next.confirmed_count -= 1;
+            if (next.waitlisted.length > 0 && next.confirmed_count < next.confirmed_capacity) {
+              const promoted = { ...next.waitlisted.shift(), pending: true };
+              next.confirmed.push(promoted);
+              next.confirmed_count += 1;
+              next.waitlisted_count -= 1;
+            }
+          } else {
+            next.waitlisted_count -= 1;
+          }
         });
-        const data = await res.json();
-        showMessage(data.message);
-        await loadEventState();
       });
 
-      loadEventState().catch(() => showMessage('暫時無法讀取名單，請重新整理。'));
+      window.addEventListener('app:reconnect', loadEventState);
+      loadEventState();
+
+      if (history.replaceState && location.search.includes('msg=')) {
+        history.replaceState(null, '', '/event');
+      }
     </script>
     """
     return layout("查看 / 報名", body.replace("__REGISTRATION_FORM__", form), flash)
 
 
-def public_state():
+def public_state(include_admin=False):
     event, confirmed_count, waitlisted_count = get_current_event_with_counts()
     status, label = event_status(event, confirmed_count, waitlisted_count)
-    return {
+    state = {
+        "event_id": event["id"],
         "event_date": format_event_date(event),
         "start_time": event["start_time"],
         "end_time": event["end_time"],
@@ -1031,6 +1155,19 @@ def public_state():
         "confirmed": [{"id": row["id"], "name": row["name"]} for row in list_registrations(event["id"], "confirmed")],
         "waitlisted": [{"id": row["id"], "name": row["name"]} for row in list_registrations(event["id"], "waitlisted")],
     }
+    if include_admin:
+        state["cancelled"] = [
+            {"id": row["id"], "name": row["name"]}
+            for row in list_registrations(event["id"], "cancelled")
+        ]
+        state["recurring_players"] = [
+            {"id": row["id"], "name": row["name"]} for row in list_recurring_players()
+        ]
+    return state
+
+
+def state_response(ok, message, include_admin=False, status_code=200):
+    return jsonify({"ok": ok, "message": message, "state": public_state(include_admin)}), status_code
 
 
 def admin_authorized():
@@ -1053,30 +1190,25 @@ def admin_login_page(flash=""):
 
 
 def admin_page(flash=""):
-    event, confirmed_count, waitlisted_count = get_current_event_with_counts()
-    confirmed = list_registrations(event["id"], "confirmed")
-    waitlisted = list_registrations(event["id"], "waitlisted")
-    cancelled = list_registrations(event["id"], "cancelled")
-    recurring_players = list_recurring_players()
-    body = f"""
+    body = """
     <section class="hero">
       <span class="badge">管理後台</span>
-      <h1>{format_event_date(event)}<br>名單管理</h1>
-      <p class="sub">{event['start_time']}-{event['end_time']} · {escape(event['location'])}</p>
+      <h1 id="admin-title">本週三<br>名單管理</h1>
+      <p class="sub" id="admin-meta">讀取中</p>
       <div class="stats">
-        <div class="stat"><span>正式名單</span><strong>{confirmed_count} / {event['confirmed_capacity']}</strong></div>
-        <div class="stat"><span>候補名單</span><strong>{waitlisted_count} / {event['waitlist_capacity']}</strong></div>
+        <div class="stat"><span>正式名單</span><strong id="confirmed-count">-- / --</strong></div>
+        <div class="stat"><span>候補名單</span><strong id="waitlisted-count">-- / --</strong></div>
       </div>
-      <form class="form" method="post" action="/admin/settings">
+      <form class="form" id="settings-form">
         <label for="confirmed_capacity">正式名額</label>
-        <input id="confirmed_capacity" name="confirmed_capacity" type="number" min="{confirmed_count}" max="99" value="{event['confirmed_capacity']}">
+        <input id="confirmed_capacity" name="confirmed_capacity" type="number" min="1" max="99">
         <label for="waitlist_capacity">候補名額</label>
-        <input id="waitlist_capacity" name="waitlist_capacity" type="number" min="{waitlisted_count}" max="99" value="{event['waitlist_capacity']}">
+        <input id="waitlist_capacity" name="waitlist_capacity" type="number" min="0" max="99">
         <button class="secondary">更新名額設定</button>
       </form>
-      <form class="form" method="post" action="/admin/add">
-        <label for="name">新增球友</label>
-        <input id="name" name="name" maxlength="40" placeholder="輸入名字">
+      <form class="form" id="add-form">
+        <label for="add-name">新增球友</label>
+        <input id="add-name" name="name" maxlength="40" placeholder="輸入名字">
         <select name="status">
           <option value="confirmed">加入正式名單</option>
           <option value="waitlisted">加入候補名單</option>
@@ -1085,20 +1217,331 @@ def admin_page(flash=""):
       </form>
     </section>
     <section class="grid two">
-      <div class="panel"><h2>正式名單</h2>{roster_html(confirmed, "正式", admin=True)}</div>
-      <div class="panel"><h2>候補名單</h2>{roster_html(waitlisted, "候補", admin=True)}</div>
-      <div class="panel"><h2>取消紀錄</h2>{roster_html(cancelled, "取消", admin=True)}</div>
+      <div class="panel"><h2>正式名單</h2><div id="confirmed-roster"><p class="empty">讀取中。</p></div></div>
+      <div class="panel"><h2>候補名單</h2><div id="waitlisted-roster"><p class="empty">讀取中。</p></div></div>
+      <div class="panel"><h2>取消紀錄</h2><div id="cancelled-roster"><p class="empty">讀取中。</p></div></div>
       <div class="panel">
         <h2>固定報名者</h2>
         <p class="sub">每週新場次建立時，系統會自動幫這些人報名。</p>
-        <form class="form" method="post" action="/admin/recurring/add">
-          <label for="recurring_name">新增固定報名者</label>
-          <input id="recurring_name" name="name" maxlength="40" placeholder="輸入名字">
+        <form class="form" id="recurring-add-form">
+          <label for="recurring-name">新增固定報名者</label>
+          <input id="recurring-name" name="name" maxlength="40" placeholder="輸入名字">
           <button>加入固定名單</button>
         </form>
-        {recurring_players_html(recurring_players)}
+        <div id="recurring-roster"><p class="empty">讀取中。</p></div>
       </div>
     </section>
+    <script>
+      const flashEl = document.querySelector('.flash');
+      let state = null;
+      let previousState = null;
+      let optimisticId = -1;
+      let lastTicket = 0;
+      let sessionExpired = false;
+
+      function escapeHtml(value) {
+        return String(value).replace(/[&<>"']/g, (char) => ({
+          '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;'
+        }[char]));
+      }
+
+      function showMessage(message, isError) {
+        if (!message) return;
+        if (window.netBanner) window.netBanner.show(message, 2400);
+        if (flashEl) {
+          flashEl.textContent = message;
+          flashEl.classList.toggle('is-error', !!isError);
+          return;
+        }
+        const box = document.createElement('div');
+        box.className = 'flash' + (isError ? ' is-error' : '');
+        box.textContent = message;
+        document.querySelector('.topbar').after(box);
+      }
+
+      function gatherIds(s) {
+        if (!s) return new Set();
+        return new Set([
+          ...s.confirmed.map(p => p.id),
+          ...s.waitlisted.map(p => p.id),
+          ...(s.cancelled || []).map(p => p.id),
+          ...(s.recurring_players || []).map(p => p.id),
+        ]);
+      }
+
+      function annotate(arr, prevIds) {
+        return arr.map(item => ({ ...item, is_new: !prevIds.has(item.id) }));
+      }
+
+      function rosterHtml(rows, kind) {
+        if (!rows.length) return '<p class="empty">目前沒有人。</p>';
+        return `<ol class="roster">${rows.map((row, index) => {
+          const label = kind === 'confirmed' ? index + 1
+            : kind === 'waitlisted' ? `候補 ${index + 1}`
+            : `取消 ${index + 1}`;
+          const pendingTag = row.pending ? '<span class="meta">同步中</span>' : '';
+          const disabled = row.pending ? 'disabled' : '';
+          const classes = ['person'];
+          if (row.pending) classes.push('is-pending');
+          if (row.is_new) classes.push('is-entering');
+          let controls = '';
+          if (kind === 'confirmed' || kind === 'waitlisted') {
+            const flipStatus = kind === 'confirmed' ? 'waitlisted' : 'confirmed';
+            const flipLabel = kind === 'confirmed' ? '轉候補' : '轉正式';
+            controls = `<div class="admin-controls">
+              <button class="small secondary" data-admin-move data-id="${row.id}" data-direction="up" ${disabled}>上移</button>
+              <button class="small secondary" data-admin-move data-id="${row.id}" data-direction="down" ${disabled}>下移</button>
+              <button class="small secondary" data-admin-status data-id="${row.id}" data-status="${flipStatus}" ${disabled}>${flipLabel}</button>
+              <button class="small danger" data-admin-status data-id="${row.id}" data-status="cancelled" data-name="${escapeHtml(row.name)}" ${disabled}>取消</button>
+            </div>`;
+          } else {
+            controls = `<div class="admin-controls">
+              <button class="small secondary" data-admin-status data-id="${row.id}" data-status="confirmed" ${disabled}>還原正式</button>
+              <button class="small secondary" data-admin-status data-id="${row.id}" data-status="waitlisted" ${disabled}>還原候補</button>
+            </div>`;
+          }
+          return `<li class="${classes.join(' ')}" data-key="reg-${row.id}"><span class="num">${label}</span><span class="name">${escapeHtml(row.name)}${pendingTag}</span>${controls}</li>`;
+        }).join('')}</ol>`;
+      }
+
+      function recurringHtml(rows) {
+        if (!rows.length) return '<p class="empty">目前沒有固定報名者。</p>';
+        return `<ol class="roster">${rows.map((row, index) => {
+          const pendingTag = row.pending ? '<span class="meta">同步中</span>' : '';
+          const disabled = row.pending ? 'disabled' : '';
+          const classes = ['person'];
+          if (row.pending) classes.push('is-pending');
+          if (row.is_new) classes.push('is-entering');
+          return `<li class="${classes.join(' ')}" data-key="rec-${row.id}"><span class="num">${index + 1}</span><span class="name">${escapeHtml(row.name)}${pendingTag}</span><button class="small danger" data-recurring-delete data-id="${row.id}" data-name="${escapeHtml(row.name)}" ${disabled}>移除</button></li>`;
+        }).join('')}</ol>`;
+      }
+
+      function render(newState) {
+        const prevIds = gatherIds(state);
+        previousState = state;
+        state = newState;
+        document.getElementById('admin-title').innerHTML = `${escapeHtml(newState.event_date)}<br>名單管理`;
+        document.getElementById('admin-meta').textContent = `${newState.start_time}-${newState.end_time} · ${newState.location}`;
+        document.getElementById('confirmed-count').textContent = `${newState.confirmed_count} / ${newState.confirmed_capacity}`;
+        document.getElementById('waitlisted-count').textContent = `${newState.waitlisted_count} / ${newState.waitlist_capacity}`;
+
+        const cc = document.getElementById('confirmed_capacity');
+        const wc = document.getElementById('waitlist_capacity');
+        if (document.activeElement !== cc) cc.value = newState.confirmed_capacity;
+        if (document.activeElement !== wc) wc.value = newState.waitlist_capacity;
+        cc.min = newState.confirmed_count;
+        wc.min = newState.waitlisted_count;
+
+        document.getElementById('confirmed-roster').innerHTML = rosterHtml(annotate(newState.confirmed, prevIds), 'confirmed');
+        document.getElementById('waitlisted-roster').innerHTML = rosterHtml(annotate(newState.waitlisted, prevIds), 'waitlisted');
+        document.getElementById('cancelled-roster').innerHTML = rosterHtml(annotate(newState.cancelled || [], prevIds), 'cancelled');
+        document.getElementById('recurring-roster').innerHTML = recurringHtml(annotate(newState.recurring_players || [], prevIds));
+      }
+
+      function renderSessionExpired() {
+        sessionExpired = true;
+        const shell = document.querySelector('main.shell');
+        if (!shell) return;
+        const banner = document.createElement('section');
+        banner.className = 'hero';
+        banner.innerHTML = `
+          <h1>需要重新登入</h1>
+          <p class="sub">管理工作階段已過期，請重新輸入密碼。</p>
+          <form class="form" method="post" action="/admin/login">
+            <label for="password">管理密碼</label>
+            <input id="password" type="password" name="password" autofocus>
+            <button>登入</button>
+          </form>
+        `;
+        const topbar = shell.querySelector('.topbar');
+        Array.from(shell.children).forEach((el) => { if (el !== topbar) el.remove(); });
+        shell.appendChild(banner);
+      }
+
+      async function adminAction(url, params, optimistic) {
+        if (sessionExpired || !state) return;
+        const snapshot = structuredClone(state);
+        const next = structuredClone(state);
+        if (typeof optimistic === 'function') {
+          if (optimistic(next) === false) return;
+          render(next);
+        }
+        const myTicket = ++lastTicket;
+        try {
+          const res = await fetch(url, {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: new URLSearchParams(params),
+          });
+          if (res.status === 401) {
+            renderSessionExpired();
+            return;
+          }
+          const data = await res.json();
+          if (myTicket !== lastTicket) return;
+          if (!data.ok && data.message) showMessage(data.message, true);
+          if (data.state) {
+            render(data.state);
+          } else if (!data.ok) {
+            render(snapshot);
+          }
+        } catch (err) {
+          if (myTicket === lastTicket) render(snapshot);
+          showMessage('連線失敗，操作未送出。', true);
+        }
+      }
+
+      async function loadAdminState() {
+        if (sessionExpired) return;
+        try {
+          const res = await fetch('/api/admin/state', { cache: 'no-store', credentials: 'same-origin' });
+          if (res.status === 401) { renderSessionExpired(); return; }
+          const data = await res.json();
+          render(data);
+        } catch (err) {
+          showMessage('暫時無法讀取，請重新整理。', true);
+        }
+      }
+
+      function locateRegistration(s, id) {
+        for (const list of ['confirmed', 'waitlisted', 'cancelled']) {
+          const idx = (s[list] || []).findIndex(p => p.id === id);
+          if (idx !== -1) return { list, idx, item: s[list][idx] };
+        }
+        return null;
+      }
+
+      document.getElementById('add-form').addEventListener('submit', (event) => {
+        event.preventDefault();
+        const form = event.target;
+        const data = new FormData(form);
+        const name = (data.get('name') || '').trim().replace(/\s+/g, ' ');
+        const status = data.get('status');
+        if (!name) { showMessage('請輸入名字。', true); return; }
+        adminAction('/api/admin/add', { name, status }, (next) => {
+          const dup = [...next.confirmed, ...next.waitlisted].some(p => p.name.toLowerCase() === name.toLowerCase());
+          if (dup) { showMessage('這個名字已經報名了。', true); return false; }
+          if (status === 'confirmed') {
+            if (next.confirmed_count >= next.confirmed_capacity) { showMessage('正式名單已滿。', true); return false; }
+            next.confirmed.push({ id: optimisticId--, name, pending: true });
+            next.confirmed_count += 1;
+          } else {
+            if (next.waitlisted_count >= next.waitlist_capacity) { showMessage('候補名單已滿。', true); return false; }
+            next.waitlisted.push({ id: optimisticId--, name, pending: true });
+            next.waitlisted_count += 1;
+          }
+        });
+        form.reset();
+      });
+
+      document.getElementById('settings-form').addEventListener('submit', (event) => {
+        event.preventDefault();
+        const data = new FormData(event.target);
+        const confirmed_capacity = data.get('confirmed_capacity');
+        const waitlist_capacity = data.get('waitlist_capacity');
+        adminAction('/api/admin/settings', { confirmed_capacity, waitlist_capacity }, (next) => {
+          const c = parseInt(confirmed_capacity, 10);
+          const w = parseInt(waitlist_capacity, 10);
+          if (Number.isNaN(c) || Number.isNaN(w)) { showMessage('名額必須是數字。', true); return false; }
+          if (c < next.confirmed_count) { showMessage(`正式名額不能小於目前 ${next.confirmed_count}。`, true); return false; }
+          if (w < next.waitlisted_count) { showMessage(`候補名額不能小於目前 ${next.waitlisted_count}。`, true); return false; }
+          next.confirmed_capacity = c;
+          next.waitlist_capacity = w;
+        });
+      });
+
+      document.getElementById('recurring-add-form').addEventListener('submit', (event) => {
+        event.preventDefault();
+        const form = event.target;
+        const data = new FormData(form);
+        const name = (data.get('name') || '').trim().replace(/\s+/g, ' ');
+        if (!name) { showMessage('請輸入名字。', true); return; }
+        adminAction('/api/admin/recurring/add', { name }, (next) => {
+          const dup = next.recurring_players.some(p => p.name.toLowerCase() === name.toLowerCase());
+          if (dup) { showMessage('這個名字已經在固定報名名單。', true); return false; }
+          next.recurring_players.push({ id: optimisticId--, name, pending: true });
+        });
+        form.reset();
+      });
+
+      document.addEventListener('click', (event) => {
+        const moveBtn = event.target.closest('[data-admin-move]');
+        if (moveBtn) {
+          const id = Number(moveBtn.dataset.id);
+          const direction = moveBtn.dataset.direction;
+          adminAction('/api/admin/move', { id, direction }, (next) => {
+            for (const list of ['confirmed', 'waitlisted']) {
+              const idx = next[list].findIndex(p => p.id === id);
+              if (idx === -1) continue;
+              const swapIdx = direction === 'up' ? idx - 1 : idx + 1;
+              if (swapIdx < 0 || swapIdx >= next[list].length) return false;
+              const a = { ...next[list][idx], pending: true };
+              const b = { ...next[list][swapIdx], pending: true };
+              next[list][idx] = b;
+              next[list][swapIdx] = a;
+              return;
+            }
+            return false;
+          });
+          return;
+        }
+        const statusBtn = event.target.closest('[data-admin-status]');
+        if (statusBtn) {
+          const id = Number(statusBtn.dataset.id);
+          const target = statusBtn.dataset.status;
+          const name = statusBtn.dataset.name;
+          if (target === 'cancelled' && name && !confirm(`確定取消 ${name} 的報名嗎？`)) return;
+          adminAction('/api/admin/status', { id, status: target }, (next) => {
+            const found = locateRegistration(next, id);
+            if (!found) return false;
+            const { list: source, idx, item } = found;
+            if (source === target) return false;
+            if (target === 'confirmed' && next.confirmed_count >= next.confirmed_capacity) {
+              showMessage('正式名單已滿。', true); return false;
+            }
+            if (target === 'waitlisted' && next.waitlisted_count >= next.waitlist_capacity) {
+              showMessage('候補名單已滿。', true); return false;
+            }
+            next[source].splice(idx, 1);
+            if (source === 'confirmed') next.confirmed_count -= 1;
+            else if (source === 'waitlisted') next.waitlisted_count -= 1;
+            const moved = { ...item, pending: true };
+            if (target === 'confirmed') { next.confirmed.push(moved); next.confirmed_count += 1; }
+            else if (target === 'waitlisted') { next.waitlisted.push(moved); next.waitlisted_count += 1; }
+            else {
+              next.cancelled = next.cancelled || [];
+              next.cancelled.unshift(moved);
+              if (source === 'confirmed' && next.waitlisted.length > 0 && next.confirmed_count < next.confirmed_capacity) {
+                const promoted = { ...next.waitlisted.shift(), pending: true };
+                next.confirmed.push(promoted);
+                next.confirmed_count += 1;
+                next.waitlisted_count -= 1;
+              }
+            }
+          });
+          return;
+        }
+        const recDelete = event.target.closest('[data-recurring-delete]');
+        if (recDelete) {
+          const id = Number(recDelete.dataset.id);
+          const name = recDelete.dataset.name;
+          if (!confirm(`確定移除 ${name} 的固定報名設定嗎？`)) return;
+          adminAction('/api/admin/recurring/delete', { id }, (next) => {
+            const idx = next.recurring_players.findIndex(p => p.id === id);
+            if (idx === -1) return false;
+            next.recurring_players.splice(idx, 1);
+          });
+        }
+      });
+
+      window.addEventListener('app:reconnect', loadAdminState);
+      loadAdminState();
+
+      if (history.replaceState && location.search.includes('msg=')) {
+        history.replaceState(null, '', '/admin');
+      }
+    </script>
     """
     return layout("管理後台", body, flash)
 
@@ -1121,13 +1564,100 @@ def api_state():
 @app.post("/api/register")
 def api_register():
     ok, msg = add_registration(ensure_current_event(), request.form.get("name", ""), "player")
-    return jsonify({"ok": ok, "message": msg})
+    return state_response(ok, msg)
 
 
 @app.post("/api/cancel")
 def api_cancel():
     ok, msg = cancel_registration(int(request.form.get("id", "0")), "player")
-    return jsonify({"ok": ok, "message": msg})
+    return state_response(ok, msg)
+
+
+def admin_json_guard():
+    if admin_authorized():
+        return None
+    return jsonify({"ok": False, "message": "請先登入管理後台。", "auth_required": True}), 401
+
+
+@app.get("/api/admin/state")
+def api_admin_state():
+    guard = admin_json_guard()
+    if guard is not None:
+        return guard
+    return jsonify(public_state(include_admin=True))
+
+
+@app.post("/api/admin/add")
+def api_admin_add():
+    guard = admin_json_guard()
+    if guard is not None:
+        return guard
+    ok, msg = add_registration(
+        ensure_current_event(),
+        request.form.get("name", ""),
+        "admin",
+        request.form.get("status", "confirmed"),
+    )
+    return state_response(ok, msg, include_admin=True)
+
+
+@app.post("/api/admin/cancel")
+def api_admin_cancel():
+    guard = admin_json_guard()
+    if guard is not None:
+        return guard
+    ok, msg = cancel_registration(int(request.form.get("id", "0")), "admin")
+    return state_response(ok, msg, include_admin=True)
+
+
+@app.post("/api/admin/status")
+def api_admin_status():
+    guard = admin_json_guard()
+    if guard is not None:
+        return guard
+    ok, msg = update_status(int(request.form.get("id", "0")), request.form.get("status", ""))
+    return state_response(ok, msg, include_admin=True)
+
+
+@app.post("/api/admin/move")
+def api_admin_move():
+    guard = admin_json_guard()
+    if guard is not None:
+        return guard
+    ok, msg = move_registration(int(request.form.get("id", "0")), request.form.get("direction", "down"))
+    return state_response(ok, msg, include_admin=True)
+
+
+@app.post("/api/admin/settings")
+def api_admin_settings():
+    guard = admin_json_guard()
+    if guard is not None:
+        return guard
+    event = ensure_current_event()
+    ok, msg = update_event_settings(
+        event["id"],
+        request.form.get("confirmed_capacity", ""),
+        request.form.get("waitlist_capacity", ""),
+    )
+    return state_response(ok, msg, include_admin=True)
+
+
+@app.post("/api/admin/recurring/add")
+def api_admin_recurring_add():
+    guard = admin_json_guard()
+    if guard is not None:
+        return guard
+    ok, msg = add_recurring_player(request.form.get("name", ""))
+    return state_response(ok, msg, include_admin=True)
+
+
+@app.post("/api/admin/recurring/delete")
+def api_admin_recurring_delete():
+    guard = admin_json_guard()
+    if guard is not None:
+        return guard
+    ok, msg = delete_recurring_player(int(request.form.get("id", "0")))
+    return state_response(ok, msg, include_admin=True)
 
 
 @app.post("/register")

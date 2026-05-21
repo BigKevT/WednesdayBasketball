@@ -31,6 +31,7 @@ LOCATION = "木柵國中"
 
 app = Flask(__name__)
 DB_INITIALIZED = False
+SHARED_DB_CONN = None
 
 
 class RequestConnection:
@@ -79,19 +80,32 @@ def new_connection():
     return conn
 
 
+def shared_postgres_connection():
+    global SHARED_DB_CONN
+    if SHARED_DB_CONN is None or SHARED_DB_CONN.closed:
+        SHARED_DB_CONN = new_connection()
+    return SHARED_DB_CONN
+
+
 def connect():
     if not has_request_context():
         return new_connection()
 
     if "db_conn" not in g:
-        g.db_conn = new_connection()
+        if using_postgres():
+            g.db_conn = shared_postgres_connection()
+            g.db_conn_shared = True
+        else:
+            g.db_conn = new_connection()
+            g.db_conn_shared = False
     return RequestConnection(g.db_conn)
 
 
 @app.teardown_appcontext
 def close_db(error=None):
     conn = g.pop("db_conn", None)
-    if conn is not None:
+    shared = g.pop("db_conn_shared", False)
+    if conn is not None and not shared:
         conn.close()
 
 

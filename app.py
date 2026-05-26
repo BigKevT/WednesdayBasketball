@@ -271,8 +271,12 @@ def next_wednesday_event_date():
     return event_day
 
 
-def registration_deadline_for(event_day):
+def registration_open_for(event_day):
     return datetime.combine(event_day - timedelta(days=1), DEADLINE_TIME, tzinfo=TZ)
+
+
+def registration_deadline_for(event_day):
+    return datetime.combine(event_day, DEADLINE_TIME, tzinfo=TZ)
 
 
 def ensure_current_event():
@@ -486,7 +490,11 @@ def add_registration(event, name, created_by="player", force_status=None):
         return False, "請輸入名字。"
 
     current = now()
+    event_day = date.fromisoformat(event["date"])
+    open_time = registration_open_for(event_day)
     deadline = datetime.fromisoformat(event["registration_deadline"])
+    if created_by == "player" and current < open_time:
+        return False, "本週尚未開放報名。"
     if created_by == "player" and current > deadline:
         return False, "本週報名已截止。"
 
@@ -656,7 +664,11 @@ def move_registration(registration_id, direction):
 
 
 def event_status(event, confirmed_count, waitlisted_count):
-    if now() > datetime.fromisoformat(event["registration_deadline"]):
+    current = now()
+    event_day = date.fromisoformat(event["date"])
+    if current < registration_open_for(event_day):
+        return "not_open_yet", "本週尚未開放報名"
+    if current > datetime.fromisoformat(event["registration_deadline"]):
         return "closed", "本週報名已截止"
     if confirmed_count < event["confirmed_capacity"]:
         return "open", "可報名"
@@ -674,6 +686,13 @@ def format_deadline(event):
     deadline = datetime.fromisoformat(event["registration_deadline"])
     weekday_labels = ["一", "二", "三", "四", "五", "六", "日"]
     return f"{deadline.month}/{deadline.day}（{weekday_labels[deadline.weekday()]}） {deadline.strftime('%H:%M')}"
+
+
+def format_open_time(event):
+    event_day = date.fromisoformat(event["date"])
+    open_time = registration_open_for(event_day)
+    weekday_labels = ["一", "二", "三", "四", "五", "六", "日"]
+    return f"{open_time.month}/{open_time.day}（{weekday_labels[open_time.weekday()]}） {open_time.strftime('%H:%M')}"
 
 
 def layout(title, body, flash=""):
@@ -1081,7 +1100,7 @@ def event_page(flash=""):
         if (!name) { showMessage('請輸入名字。', true); return; }
         input.value = '';
         eventAction('/api/register', { name }, (next) => {
-          if (next.form_disabled) { showMessage('本週報名已截止。', true); return false; }
+          if (next.form_disabled) { showMessage(`${next.button_text}。`, true); return false; }
           const dup = [...next.confirmed, ...next.waitlisted].some(p => p.name.toLowerCase() === name.toLowerCase());
           if (dup) { showMessage('這個名字已經報名了。', true); return false; }
           const player = { id: optimisticId--, name, pending: true };
@@ -1144,14 +1163,20 @@ def public_state(include_admin=False):
         "end_time": event["end_time"],
         "location": event["location"],
         "deadline": format_deadline(event),
+        "open_at": format_open_time(event),
         "confirmed_count": confirmed_count,
         "waitlisted_count": waitlisted_count,
         "confirmed_capacity": event["confirmed_capacity"],
         "waitlist_capacity": event["waitlist_capacity"],
         "status": status,
         "status_label": label,
-        "form_disabled": status in {"closed", "full"},
-        "button_text": "本週報名已截止" if status == "closed" else "本週已滿" if status == "full" else "報名",
+        "form_disabled": status in {"not_open_yet", "closed", "full"},
+        "button_text": (
+            "本週尚未開放報名" if status == "not_open_yet"
+            else "本週報名已截止" if status == "closed"
+            else "本週已滿" if status == "full"
+            else "報名"
+        ),
         "confirmed": [{"id": row["id"], "name": row["name"]} for row in list_registrations(event["id"], "confirmed")],
         "waitlisted": [{"id": row["id"], "name": row["name"]} for row in list_registrations(event["id"], "waitlisted")],
     }
